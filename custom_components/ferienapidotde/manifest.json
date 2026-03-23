@@ -1,9 +1,9 @@
 {
   "domain": "ferienapidotde",
   "name": "ferienapidotde",
-  "documentation": "https://github.com/HazardDede/home-assistant-ferienapidotde",
+  "documentation": "https://github.com/mallewski/home-assistant-ferienapidotde",
   "dependencies": [],
-  "codeowners": ["@HazardDede"],
+  "codeowners": ["@HazardDede", "@mallewski"],
   "requirements": ["ferien-api==0.3.7"],
-  "version": "0.3.0"
+  "version": "0.4.0"
 }
