@@ -86,6 +86,7 @@ async def async_setup_platform(
     name = config.get(CONF_NAME)
 
     data_object = VacationData(hass, state_code)
+    await data_object.async_init()
 
     if data_object.data is None:
         # No valid cache available - need an initial fetch from the API.
@@ -170,10 +171,14 @@ class VacationData:
     """Class for handling data retrieval with local caching."""
 
     def __init__(self, hass, state_code):
-        """Initializer. Immediately loads data from local cache if available."""
+        """Initializer. Cache loading is deferred to async_init."""
         self.hass = hass
         self.state_code = str(state_code)
-        self.data = self._load_from_cache()
+        self.data = None
+
+    async def async_init(self):
+        """Load cached data in an executor to avoid blocking the event loop."""
+        self.data = await self.hass.async_add_executor_job(self._load_from_cache)
 
     def _cache_path(self):
         return self.hass.config.path(
@@ -236,7 +241,9 @@ class VacationData:
                 "Retrieving data from ferien-api.de for %s",
                 self.state_code
             )
-            self.data = await ferien.state_vacations_async(self.state_code)
+            self.data = await self.hass.async_add_executor_job(
+                ferien.state_vacations, self.state_code
+            )
             await self.hass.async_add_executor_job(self._save_to_cache, self.data)
         except Exception as ex:  # pylint: disable=broad-except
             if self.data is None:
