@@ -6,7 +6,9 @@ For more details about this platform, please refer to the documentation at
 https://github.com/HazardDede/home-assistant-ferienapidotde
 """
 
+import json
 import logging
+import os
 from datetime import datetime, timedelta
 
 import voluptuous as vol
@@ -55,8 +57,11 @@ DEFAULT_NAME = "Vacation Sensor"
 ICON_OFF_DEFAULT = "mdi:calendar-remove"
 ICON_ON_DEFAULT = "mdi:calendar-check"
 
-# Don't rush the api. Every 12h should suffice.
-MIN_TIME_BETWEEN_UPDATES = timedelta(hours=12)
+# Only fetch fresh data from the API once per day.
+MIN_TIME_BETWEEN_UPDATES = timedelta(hours=24)
+
+# Cache is valid for 30 days - vacation schedules don't change frequently.
+CACHE_TTL = timedelta(days=30)
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -67,7 +72,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     }
 )
 
-SCAN_INTERVAL = timedelta(minutes=1)
+# Check every 6 hours whether an update is due; actual API calls are throttled.
+SCAN_INTERVAL = timedelta(hours=6)
 
 
 async def async_setup_platform(
@@ -79,14 +85,16 @@ async def async_setup_platform(
     state_code = config.get(CONF_STATE)
     name = config.get(CONF_NAME)
 
-    try:
-        data_object = VacationData(state_code)
-        await data_object.async_update()
-    except Exception as ex:
-        import traceback
+    data_object = VacationData(hass, state_code)
 
-        _LOGGER.warning(traceback.format_exc())
-        raise PlatformNotReady() from ex
+    if data_object.data is None:
+        # No valid cache available - need an initial fetch from the API.
+        try:
+            await data_object.async_update()
+        except Exception as ex:
+            import traceback
+            _LOGGER.warning(traceback.format_exc())
+            raise PlatformNotReady() from ex
 
     async_add_entities([VacationSensor(name, days_offset, data_object)], True)
 
@@ -158,27 +166,82 @@ class VacationSensor(BinarySensorEntity):
             }
 
 
-class VacationData:  # pylint: disable=too-few-public-methods
-    """Class for handling data retrieval."""
+class VacationData:
+    """Class for handling data retrieval with local caching."""
 
-    def __init__(self, state_code):
-        """Initializer."""
+    def __init__(self, hass, state_code):
+        """Initializer. Immediately loads data from local cache if available."""
+        self.hass = hass
         self.state_code = str(state_code)
-        self.data = None
+        self.data = self._load_from_cache()
+
+    def _cache_path(self):
+        return self.hass.config.path(
+            "ferienapidotde_{}.json".format(self.state_code)
+        )
+
+    def _load_from_cache(self):
+        """Returns cached vacation data if present and not expired, else None."""
+        try:
+            path = self._cache_path()
+            if not os.path.exists(path):
+                return None
+            with open(path) as f:
+                cached = json.load(f)
+            cached_at = datetime.fromisoformat(cached["cached_at"])
+            if datetime.now() - cached_at > CACHE_TTL:
+                _LOGGER.debug("Cache for %s is expired", self.state_code)
+                return None
+            from ferien.model import Vacation  # pylint: disable=import-outside-toplevel
+            data = [Vacation.from_dict(v) for v in cached["vacations"]]
+            _LOGGER.debug(
+                "Loaded %d vacations for %s from cache (cached at %s)",
+                len(data), self.state_code, cached_at.strftime("%Y-%m-%d %H:%M")
+            )
+            return data
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.debug("Could not load cache for %s: %s", self.state_code, ex)
+            return None
+
+    def _save_to_cache(self, data):
+        """Persists vacation data to a local JSON file."""
+        try:
+            serialized = [
+                {
+                    "start": v.start.strftime("%Y-%m-%d"),
+                    "end": v.end.strftime("%Y-%m-%d"),
+                    "year": v.year,
+                    "stateCode": v.state_code,
+                    "name": v.name,
+                    "slug": v.slug,
+                }
+                for v in data
+            ]
+            with open(self._cache_path(), "w") as f:
+                json.dump(
+                    {"cached_at": datetime.now().isoformat(), "vacations": serialized},
+                    f,
+                    indent=2
+                )
+            _LOGGER.debug("Saved %d vacations for %s to cache", len(data), self.state_code)
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.warning("Could not save cache for %s: %s", self.state_code, ex)
 
     @Throttle(MIN_TIME_BETWEEN_UPDATES)
     async def async_update(self):
         """Updates the publicly available data container."""
         try:
-            import ferien
+            import ferien  # pylint: disable=import-outside-toplevel
             _LOGGER.debug(
                 "Retrieving data from ferien-api.de for %s",
                 self.state_code
             )
             self.data = await ferien.state_vacations_async(self.state_code)
+            await self.hass.async_add_executor_job(self._save_to_cache, self.data)
         except Exception:  # pylint: disable=broad-except
             if self.data is None:
                 raise
             _LOGGER.error(
-                "Failed to update the vacation data. Re-using an old state"
+                "Failed to update the vacation data for %s. Re-using cached state.",
+                self.state_code
             )
