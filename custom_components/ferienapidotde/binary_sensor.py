@@ -238,10 +238,10 @@ class VacationData:
             )
             self.data = await ferien.state_vacations_async(self.state_code)
             await self.hass.async_add_executor_job(self._save_to_cache, self.data)
-        except Exception:  # pylint: disable=broad-except
+        except Exception as ex:  # pylint: disable=broad-except
             if self.data is None:
                 raise
-            _LOGGER.error(
-                "Failed to update the vacation data for %s. Re-using cached state.",
-                self.state_code
+            _LOGGER.warning(
+                "Failed to update the vacation data for %s (%s). Re-using cached state.",
+                self.state_code, ex
             )
